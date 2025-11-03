@@ -1,0 +1,126 @@
+<!-- protocol-name -->
+
+SSE protocol
+
+<!-- install -->
+
+<!-- remote-protocol -->
+
+StreamableHttp/SSE
+
+<!-- server-setup -->
+
+a valid SSE
+
+<!-- auth-requirements -->
+
+any keys
+
+<!-- plugin-class -->
+
+`McpClientPlugin`
+
+<!-- integration-method -->
+
+as a plugin
+
+<!-- send-method -->
+
+`send`
+
+<!-- basic-example -->
+
+```python
+from microsoft.teams.ai import ChatPrompt
+from microsoft.teams.mcpplugin import McpClientPlugin
+from microsoft.teams.openai import OpenAICompletionsAIModel
+# ...
+
+# Set up AI model
+completions_model = OpenAICompletionsAIModel(model="gpt-4")
+
+# Configure MCP Client Plugin with multiple remote servers
+mcp_plugin = McpClientPlugin()
+
+# Add multiple MCP servers
+mcp_plugin.use_mcp_server("https://learn.microsoft.com/api/mcp")
+mcp_plugin.use_mcp_server("https://example.com/mcp/weather")
+mcp_plugin.use_mcp_server("https://example.com/mcp/pokemon")
+
+# ChatPrompt with MCP tools
+chat_prompt = ChatPrompt(
+    completions_model,
+    plugins=[mcp_plugin]
+)
+```
+
+<!-- multiple-servers -->
+
+In this example, we augment the `ChatPrompt` with multiple remote MCP Servers.
+
+## Authentication with Headers
+
+Many MCP servers require authentication via headers (such as API keys or Bearer tokens). You can pass these headers when configuring your MCP server:
+
+```python
+from os import getenv
+from microsoft.teams.mcpplugin import McpClientPlugin, McpClientPluginParams
+# ...
+
+# This example uses a PersonalAccessToken, but you may get
+# the user's oauth token as well by getting them to sign in
+# and then using app.sign_in to get their token.
+GITHUB_PAT = getenv("GITHUB_PAT")
+
+# MCP server with authentication headers
+if GITHUB_PAT:
+    mcp_plugin.use_mcp_server(
+        "https://api.githubcopilot.com/mcp/",
+        McpClientPluginParams(headers={
+            "Authorization": f"Bearer {GITHUB_PAT}",
+        })
+    )
+
+# Other authentication examples:
+mcp_plugin.use_mcp_server(
+    "https://example.com/api/mcp",
+    McpClientPluginParams(headers={
+        "X-API-Key": getenv('API_KEY'),
+        "Custom-Header": "custom-value"
+    })
+)
+```
+
+Headers are passed with every request to the MCP server, enabling secure access to authenticated APIs.
+
+## Using MCP Client in Message Handlers
+
+```python
+from microsoft.teams.ai import ChatPrompt
+from microsoft.teams.api import MessageActivity, MessageActivityInput
+from microsoft.teams.apps import ActivityContext
+# ...
+
+@app.on_message
+async def handle_message(ctx: ActivityContext[MessageActivity]):
+    """Handle messages using ChatPrompt with MCP tools"""
+
+    result = await chat_prompt.send(
+        input=ctx.activity.text,
+        instructions="You are a helpful assistant with access to remote MCP tools."
+    )
+
+    if result.response.content:
+        message = MessageActivityInput(text=result.response.content).add_ai_generated()
+        await ctx.send(message)
+```
+
+<!-- custom-headers -->
+
+<!-- example-gif -->
+
+![Animated image of user typing a prompt ('Tell me about Charizard') to DevTools Chat window and multiple paragraphs of information being returned.](/screenshots/mcp-client-pokemon.gif)
+
+<!-- pokemon-example -->
+
+In this example, our MCP server is a Pokemon API and our client knows how to call it. The LLM is able to call the `getPokemon` function exposed by the server and return the result back to the user.

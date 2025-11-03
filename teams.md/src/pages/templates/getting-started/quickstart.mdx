@@ -1,0 +1,75 @@
+---
+sidebar_position: 1
+sidebar_label: Quickstart
+title: Quickstart
+summary: Quick start guide for Teams AI Library v2 using the Teams CLI to create and run your first agent.
+---
+
+# Quickstart
+
+Get started with Teams AI Library (v2) quickly using the Teams CLI.
+
+## Set up a new project
+
+### Prerequisites
+
+<LanguageInclude section="prerequisites" />
+
+## Instructions
+
+### Use the Teams CLI
+
+Use your terminal to run the Teams CLI using npx:
+
+```sh
+npx @microsoft/teams.cli --version
+```
+
+:::info
+_The [Teams CLI](/developer-tools/cli) is a command-line tool that helps you create and manage Teams applications. It provides a set of commands to simplify the development process._<br /><br />
+Using `npx` allows you to run the Teams CLI without installing it globally. You can verify it works by running the version command above.
+:::
+
+## Creating Your First Agent
+
+Let's begin by creating a simple echo agent that responds to messages. Run:
+
+<LanguageInclude section="create-command" />
+
+This command:
+
+<LanguageInclude section="create-explanation" />
+
+> The `echo` template creates a basic agent that repeats back any message it receives - perfect for learning the fundamentals.
+
+## Running your agent
+
+<LanguageInclude section="running-steps" />
+
+<LanguageInclude section="console-output" />
+
+When the application starts, you'll see:
+
+1. An HTTP server starting up (on port `3978`). This is the main server which handles incoming requests and serves the agent application.
+2. A devtools server starting up (on port `3979`). This is a developer server that provides a web interface for debugging and testing your agent quickly, without having to deploy it to Teams.
+
+:::info
+The DevTools server runs on a separate port to avoid conflicts with your main application server. This allows you to test your agent locally while keeping the main server available for Teams integration.
+:::
+
+Now, navigate to the devtools server by opening your browser and navigating to [http://localhost:3979/devtools](http://localhost:3979/devtools). You should see a simple interface where you can interact with your agent. Try sending it a message!
+
+![Screenshot of DevTools showing user prompt 'hello!' and agent response 'you said hello!'.](/screenshots/devtools-echo-chat.png)
+
+## Next steps
+
+After creating and running your first agent, read about [the code basics](code-basics) to better understand its components and structure.
+
+Otherwise, if you want to run your agent in Teams, you can check out the [Running in Teams](running-in-teams) guide.
+
+## Resources
+
+- [Teams CLI documentation](/developer-tools/cli)
+- [Teams DevTools documentation](/developer-tools/devtools)
+- [Teams manifest schema](https://learn.microsoft.com/en-us/microsoftteams/platform/resources/schema/manifest-schema)
+- [Teams sideloading](https://learn.microsoft.com/en-us/microsoftteams/platform/concepts/deploy-and-publish/apps-upload)

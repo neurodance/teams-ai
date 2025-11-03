@@ -1,4 +1,3 @@
-import type * as DocsPlugin from '@docusaurus/plugin-content-docs';
 import type * as Preset from '@docusaurus/preset-classic';
 import type { Config } from '@docusaurus/types';
 import path from 'node:path';
@@ -22,7 +21,6 @@ const config: Config = {
     projectName: 'teams-ai', // Usually your repo name.
 
     onBrokenLinks: 'throw',
-    onBrokenMarkdownLinks: 'warn',
 
     // Even if you don't use internationalization, you can use this field to set
     // useful metadata like html lang. For example, if your site is Chinese, you
@@ -34,6 +32,9 @@ const config: Config = {
 
     markdown: {
         mermaid: true,
+        hooks: {
+            onBrokenMarkdownLinks: 'throw',
+        },
     },
     headTags: [
         {
@@ -57,6 +58,11 @@ const config: Config = {
                     sidebarPath: './sidebars.ts',
                     sidebarCollapsed: false,
                     editUrl: 'https://github.com/microsoft/teams-ai/tree/main/teams.md/',
+                    // Temporary exclude until generate-LLMs script is fully tested
+                    exclude: ['**/LLMs.md'],
+                },
+                pages: {
+                    exclude: ['**/templates/**'],
                 },
                 theme: {
                     customCss: ['./src/css/custom.css', './src/css/code-blocks.css'],
@@ -65,56 +71,20 @@ const config: Config = {
         ],
     ],
 
-    plugins: [
-        [
-            '@docusaurus/plugin-content-docs',
-            {
-                id: 'typescript',
-                path: 'docs/typescript',
-                routeBasePath: '/typescript',
-                sidebarPath: './sidebars.ts',
-                sidebarCollapsed: true,
-                editUrl: 'https://github.com/microsoft/teams-ai/tree/main/teams.md/',
-                exclude: ["**/LLMs.md"],
-            } satisfies Partial<DocsPlugin.PluginOptions>,
-        ],
-        [
-            '@docusaurus/plugin-content-docs',
-            {
-                id: 'csharp',
-                path: 'docs/csharp',
-                routeBasePath: '/csharp',
-                sidebarPath: './sidebars.ts',
-                sidebarCollapsed: true,
-                editUrl: 'https://github.com/microsoft/teams-ai/tree/main/teams.md/',
-                exclude: ["**/LLMs.md"]
-            } satisfies Partial<DocsPlugin.PluginOptions>,
-        ],
-        [
-            '@docusaurus/plugin-content-docs',
-            {
-                id: 'python',
-                path: 'docs/python',
-                routeBasePath: '/python',
-                sidebarPath: './sidebars.ts',
-                sidebarCollapsed: true,
-                editUrl: 'https://github.com/microsoft/teams-ai/tree/main/teams.md/',
-                exclude: ["**/LLMs.md"],
-            } satisfies Partial<DocsPlugin.PluginOptions>,
-        ],
-    ],
     themes: [
         '@docusaurus/theme-mermaid',
-        [require.resolve("@easyops-cn/docusaurus-search-local"),
-        /** @type {import("@easyops-cn/docusaurus-search-local").PluginOptions} */
-        ({
-            hashed: true,
-            language: ['en'],
-            docsRouteBasePath: ['/', '/typescript', '/csharp', '/python'],
-            indexDocs: true,
-            indexPages: true,
-            highlightSearchTermsOnTargetPage: true
-        })],
+        [
+            require.resolve('@easyops-cn/docusaurus-search-local'),
+            /** @type {import("@easyops-cn/docusaurus-search-local").PluginOptions} */
+            {
+                hashed: true,
+                language: ['en'],
+                docsRouteBasePath: ['/', '/typescript', '/csharp', '/python'],
+                indexDocs: true,
+                indexPages: true,
+                highlightSearchTermsOnTargetPage: true,
+            },
+        ],
     ],
     themeConfig: {
         colorMode: {
@@ -128,21 +98,6 @@ const config: Config = {
                 src: 'img/teams.png',
             },
             items: [
-                {
-                    to: 'typescript',
-                    position: 'left',
-                    label: 'Typescript',
-                },
-                {
-                    to: 'csharp',
-                    position: 'left',
-                    label: 'C#',
-                },
-                {
-                    to: 'python',
-                    position: 'left',
-                    label: 'Python',
-                },
                 {
                     href: 'https://github.com/microsoft/teams-ai/tree/main',
                     position: 'right',

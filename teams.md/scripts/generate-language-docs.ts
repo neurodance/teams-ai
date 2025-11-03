@@ -1,0 +1,826 @@
+#!/usr/bin/env node
+
+import * as fs from 'fs';
+import * as path from 'path';
+import * as chokidar from 'chokidar';
+import * as yaml from 'js-yaml';
+
+import { FrontmatterParser } from './lib/frontmatter-parser';
+import {
+  LANGUAGES,
+  LANGUAGE_NAMES,
+  type Language,
+  type LanguageAvailabilityMap,
+} from '../src/constants/languages';
+import normalizePath from '../src/utils/normalizePath';
+
+const missingPagesManifest: LanguageAvailabilityMap = {};
+const contentGapsManifest: { [templatePath: string]: { [sectionName: string]: Language[] } } = {};
+
+const TEMPLATES_DIR = path.join(__dirname, '..', 'src', 'pages', 'templates');
+const FRAGMENTS_DIR = path.join(__dirname, '..', 'src', 'components', 'include');
+
+const DOCS_BASE = path.join(__dirname, '..', 'docs', 'main');
+
+const isProduction = process.env.NODE_ENV === 'production';
+
+// Track all include files that are actually referenced by templates
+// Languages excluded from a template via frontmatter will not be processed
+const processedIncludeFiles = new Set<string>();
+
+// For sections in an *.mdx file that is applicable to one or two languages, but not all three.
+// This is an intentional way of differentiating from missing sections in documentation that haven't been written yet.
+const NOT_APPLICABLE_REGEX = /^(not applicable|n\/a)\s*$/i;
+
+// Notation in *.incl.md files for sections to be added into the *.mdx
+const SECTION_REGEX = (sectionName: string) =>
+  new RegExp(`<!--\\s*${sectionName}\\s*-->\\s*([\\s\\S]*?)(?=<!--\\s*[\\w-]+\\s*-->|$)`, 'i');
+
+// Regex to find LanguageInclude tags
+const LANGUAGE_INCLUDE_REGEX = /<LanguageInclude\s+section="([^"]+)"\s*\/>/g;
+
+const languagePattern = LANGUAGES.join('|');
+const LANGUAGE_INCL_FILENAME_REGEX = new RegExp(`^(${languagePattern})\\.incl\\.md$`);
+
+const FRONTMATTER_REGEX = /^---\n[\s\S]*?\n---\n/;
+
+/**
+ * Extract a section from markdown content using HTML comment markers
+ * - null: section not found (no matching HTML comment)
+ * - '': section found but marked as N/A (intentionally empty)
+ * - 'EMPTY_SECTION': section found but has no content (should show error in dev)
+ * - string: section content
+ */
+function extractSection(markdown: string, sectionName: string): string | null {
+  if (!markdown) {
+    return 'EMPTY_SECTION';
+  }
+
+  const match = markdown.match(SECTION_REGEX(sectionName));
+
+  // Section not found
+  if (!match) {
+    return null;
+  }
+
+  const content = match[1].trim();
+
+  // Content not applicable
+  if (NOT_APPLICABLE_REGEX.test(content)) {
+    return '';
+  }
+
+  // Section exists but has no content
+  if (content === '') {
+    return 'EMPTY_SECTION';
+  }
+
+  return content;
+}
+
+/**
+ * Given a template path and language, return the include file path for that language.
+ */
+function getIncludeFilePath(templatePath: string, language: Language): string {
+  const relativePath = path.relative(TEMPLATES_DIR, templatePath);
+  const fileName = path.basename(templatePath, '.mdx');
+  const dirPath = path.dirname(relativePath);
+
+  // Category files can be either index or README
+  if (fileName === 'index' || fileName === 'README') {
+    return path.join(FRAGMENTS_DIR, dirPath, `${language}.incl.md`);
+  } else {
+    return path.join(FRAGMENTS_DIR, dirPath, fileName, `${language}.incl.md`);
+  }
+}
+
+/**
+ * Given an include file path, return the expected template path.
+ */
+function getTemplatePathFromInclude(includePath: string): string {
+  const rel = path.relative(FRAGMENTS_DIR, includePath);
+  const parts = rel.split(path.sep);
+
+  // foo/bar/lang.incl.md => foo/bar.mdx
+  if (parts.length >= 2) {
+    return path.join(TEMPLATES_DIR, ...parts.slice(0, -1)) + '.mdx';
+  } else {
+    return '(unknown)';
+  }
+}
+
+/**
+ * Process LanguageInclude tags in template content and replace with Language components or raw content
+ * - Production mode + target language: generates clean files with only raw content for that language
+ * - Development mode: generates Language components with helpful error messages for missing content
+ */
+function processLanguageIncludeTags(
+  templateContent: string,
+  templatePath: string,
+  targetLanguage?: Language
+): string {
+  let processedContent = templateContent;
+  let hasLanguageInclude = false;
+
+  // Replace all LanguageInclude tags
+  processedContent = processedContent.replace(
+    LANGUAGE_INCLUDE_REGEX,
+    (match, sectionName, offset) => {
+      hasLanguageInclude = true;
+
+      // Determine if this is inline or block based on context
+      const beforeMatch = templateContent.substring(0, offset);
+
+      // Check if the tag is at the start of a line or after only whitespace (block)
+      // vs. if it's within text content (inline)
+      const lineStart = beforeMatch.lastIndexOf('\n');
+      const textBeforeOnLine = beforeMatch.substring(lineStart + 1);
+      const isBlock = /^\s*$/.test(textBeforeOnLine);
+
+      // Production mode with target language: only generate for that language
+      if (isProduction && targetLanguage) {
+        const inclPath = getIncludeFilePath(templatePath, targetLanguage);
+        if (!fs.existsSync(inclPath)) {
+          // Skip missing content (prod)
+          return '';
+        }
+
+        try {
+          const fileContent = fs.readFileSync(inclPath, 'utf8');
+          const sectionContent = extractSection(fileContent, sectionName);
+
+          if (sectionContent === null || sectionContent === '' || sectionContent === 'EMPTY_SECTION') {
+            // Skip missing sections (null), intentional N/A content (empty string), or empty sections
+            return '';
+          }
+
+          return isBlock ? `${sectionContent}` : sectionContent;
+        } catch (error) {
+          console.warn(`generate-language-docs warning: Error reading ${inclPath}: ${error}`);
+          return '';
+        }
+      }
+
+      // Development mode or no target language: generate Language components for all languages
+      // This allows dev-time rendering of messages indicating what include sections are missing.
+      const languageComponents: string[] = [];
+      const languagesToProcess = targetLanguage ? [targetLanguage] : LANGUAGES;
+
+      for (const lang of languagesToProcess) {
+        const inclPath = getIncludeFilePath(templatePath, lang);
+        let sectionContent: string | null = null;
+
+        const isLanguageRestricted = shouldGenerateForLanguage(templateContent, lang);
+
+        if (!isLanguageRestricted) {
+          // Template doesn't target this language; skip
+          continue;
+        }
+
+        // Only mark as incl file path as used if this template is supposed to generate for this language
+        processedIncludeFiles.add(path.resolve(inclPath));
+
+        if (!fs.existsSync(inclPath)) {
+          // File missing for a language the template should support - show error in development
+          if (!isProduction) {
+            const errorMsg = `[DevMode] Documentation file for ${LANGUAGE_NAMES[lang]} not found: ${path.relative(process.cwd(), inclPath)}`;
+            if (isBlock) {
+              languageComponents.push(
+                `<Language language="${lang}">\n\n${errorMsg}\n\n</Language>`
+              );
+            } else {
+              languageComponents.push(`<Language language="${lang}">${errorMsg}</Language>`);
+            }
+          }
+          continue;
+        }
+
+        try {
+          const fileContent = fs.readFileSync(inclPath, 'utf8');
+          sectionContent = extractSection(fileContent, sectionName);
+
+          if (sectionContent === null || sectionContent === 'EMPTY_SECTION') {
+            // Section not found (null) or section exists but has no content (EMPTY_SECTION)
+            // Track this gap in the manifest
+            const gapKey = path.relative(TEMPLATES_DIR, templatePath);
+            if (!contentGapsManifest[gapKey]) {
+              contentGapsManifest[gapKey] = {};
+            }
+            if (!contentGapsManifest[gapKey][sectionName]) {
+              contentGapsManifest[gapKey][sectionName] = [];
+            }
+            contentGapsManifest[gapKey][sectionName].push(lang);
+
+            // Both cases show the same error in development, skip in production
+            if (!isProduction) {
+              const errorMsg = `**[Dev] Section "${sectionName}" not found in ${LANGUAGE_NAMES[lang]} documentation.** Either mark the section explicitly as N/A for intentionally ignored, or fill in documentation.`;
+              if (isBlock) {
+                languageComponents.push(
+                  `<Language language="${lang}">\n\n${errorMsg}\n\n</Language>`
+                );
+              } else {
+                languageComponents.push(`<Language language="${lang}">${errorMsg}</Language>`);
+              }
+            }
+            continue;
+          }
+
+          if (sectionContent === '') {
+            // N/A section - intentionally skip any rendering
+            continue;
+          }
+
+          // Valid content found
+          if (isBlock) {
+            // Block-level: full Language component with markdown processing
+            languageComponents.push(
+              `<Language language="${lang}">\n\n${sectionContent}\n\n</Language>`
+            );
+          } else {
+            // Inline: single Language component with just the text content
+            languageComponents.push(`<Language language="${lang}">${sectionContent}</Language>`);
+          }
+        } catch (error) {
+          console.warn(`    Warning: Error reading ${inclPath}: ${error}`);
+          // Generate error component in development
+          if (!isProduction) {
+            const errorMsg = `[Dev] Error reading file: ${error}`;
+            if (isBlock) {
+              languageComponents.push(
+                `<Language language="${lang}">\n\n${errorMsg}\n\n</Language>`
+              );
+            } else {
+              languageComponents.push(`<Language language="${lang}">${errorMsg}</Language>`);
+            }
+          }
+        }
+      }
+
+      // Return joined Language components (or empty string if no components added)
+      if (isBlock) {
+        // Block: Each language on separate lines
+        return languageComponents.join('\n\n');
+      } else {
+        // Inline: Return all language components without line breaks to preserve list structure
+        return languageComponents.join('');
+      }
+    }
+  );
+
+  // Add Language component import if we processed any LanguageInclude tags and need Language components
+  const needsLanguageImport =
+    hasLanguageInclude &&
+    (!isProduction || !targetLanguage) &&
+    !processedContent.includes("import Language from '@site/src/components/Language'");
+
+  if (needsLanguageImport) {
+    // Find where to insert the import (after frontmatter if it exists)
+    const frontmatterMatch = processedContent.match(FRONTMATTER_REGEX);
+    const insertPosition = frontmatterMatch ? frontmatterMatch[0].length : 0;
+
+    const importStatement = "import Language from '@site/src/components/Language';\n\n";
+    processedContent =
+      processedContent.slice(0, insertPosition) +
+      importStatement +
+      processedContent.slice(insertPosition);
+  }
+
+  return processedContent;
+}
+
+function deleteInDirectory(dir: string, deletedCount: { count: number }): void {
+  const entries = fs.readdirSync(dir, { withFileTypes: true });
+
+  for (const entry of entries) {
+    const fullPath = path.join(dir, entry.name);
+
+    if (entry.isDirectory()) {
+      deleteInDirectory(fullPath, deletedCount);
+      // Remove empty directories
+      try {
+        fs.rmdirSync(fullPath);
+      } catch (e) {
+        // Directory not empty and will be cleaned up later
+      }
+    } else if (entry.isFile() && entry.name.endsWith('.mdx')) {
+      fs.unlinkSync(fullPath);
+      deletedCount.count++;
+    } else if (entry.isFile() && entry.name === '_category_.json') {
+      // Delete all category files - they will be regenerated from templates
+      fs.unlinkSync(fullPath);
+      deletedCount.count++;
+    }
+  }
+}
+
+/**
+ * Clean up stale generated files before regeneration
+ * Removes all .mdx files from docs/main/{lang}/ directories
+ */
+function cleanGeneratedFiles(): void {
+  console.log('Cleaning up stale generated files...');
+
+  let deletedCount = { count: 0 };
+
+  for (const lang of LANGUAGES) {
+    const langDir = path.join(DOCS_BASE, lang);
+
+    if (!fs.existsSync(langDir)) {
+      continue;
+    }
+
+    // Also remove root-level category file for this language
+    const rootCategoryPath = path.join(langDir, '_category_.json');
+
+    if (fs.existsSync(rootCategoryPath)) {
+      fs.unlinkSync(rootCategoryPath);
+      deletedCount.count++;
+    }
+
+    // Recursively find and delete all .mdx and _category_.json files
+    deleteInDirectory(langDir, deletedCount);
+  }
+
+  if (deletedCount.count === 0) {
+    console.log('No files to clean');
+  } else {
+    console.log(`  Cleaned up ${deletedCount.count} file(s)\n`);
+  }
+}
+
+/**
+ * Clean up generated files for a specific template
+ * Removes the generated .mdx files for all languages
+ */
+function cleanGeneratedFilesForTemplate(templatePath: string): void {
+  const relativePath = path.relative(TEMPLATES_DIR, templatePath);
+  const templateName = path.basename(templatePath);
+
+  for (const lang of LANGUAGES) {
+    const outputDir = path.join(DOCS_BASE, lang, path.dirname(relativePath));
+    // Handle both README.mdx -> index.mdx conversion and regular files
+    // Note: README.mdx category templates are converted to index.mdx for generated output
+    const outputFileName = templateName === 'README.mdx' ? 'index.mdx' : templateName;
+    const outputPath = path.join(outputDir, outputFileName);
+
+    if (fs.existsSync(outputPath)) {
+      fs.unlinkSync(outputPath);
+      console.log(`  Removed: docs/main/${lang}/${path.dirname(relativePath)}/${outputFileName}`);
+    }
+  }
+}
+
+/**
+ * Check if a template should be generated for a specific language based on frontmatter
+ */
+function shouldGenerateForLanguage(templateContent: string, language: Language): boolean {
+  const { frontmatter } = FrontmatterParser.extract(templateContent);
+
+  // Check if languages array is specified
+  if (frontmatter.languages && Array.isArray(frontmatter.languages)) {
+    return frontmatter.languages.includes(language);
+  }
+
+  // No language restriction = generate for all languages
+  return true;
+}
+
+/**
+ * Generate language-specific doc files from templates
+ * Templates in src/components/ (with nested dirs) are copied to docs/main/{lang}/
+ * Preserves directory structure and processes LanguageInclude tags
+ */
+function generateDocsForTemplate(templatePath: string): void {
+  // Calculate relative path from TEMPLATES_DIR to preserve nested structure
+  const relativePath = normalizePath(path.relative(TEMPLATES_DIR, templatePath));
+  const templateName = path.basename(templatePath);
+
+  // Read template content
+  const templateContent = fs.readFileSync(templatePath, 'utf8');
+
+  // Check frontmatter for warning suppression
+  const { frontmatter } = FrontmatterParser.extract(templateContent);
+  const suppressLanguageIncludeWarning = frontmatter.suppressLanguageIncludeWarning === true;
+
+  // Validate template contained LanguageInclude tags (unless suppressed)
+  if (!suppressLanguageIncludeWarning && !templateContent.includes('<LanguageInclude')) {
+    console.warn(
+      `\nWarning: Template "${relativePath}" does not contain <LanguageInclude /> tags.`
+    );
+    console.warn(
+      `  If the file is intended to be identical for all languages, ignore this warning.\n  Suppress this warning by adding suppressLanguageIncludeWarning: true to the file's fronmatter`
+    );
+  }
+
+  // Track which languages this page is missing from
+  const pagePath =
+    relativePath
+      .replace(/\.mdx?$/, '')
+      .replace(/README$/, '')
+      .replace(/\/$/, '') || '/';
+  const missingLanguages: Language[] = [];
+
+  for (const lang of LANGUAGES) {
+    // Check if this template should be generated for this language
+    if (!shouldGenerateForLanguage(templateContent, lang)) {
+      missingLanguages.push(lang);
+      continue;
+    }
+
+    const processedContent = processLanguageIncludeTags(templateContent, templatePath, lang);
+
+    // Extract frontmatter if exists
+    const { frontmatter, hasFrontmatter, content: contentWithoutFrontmatter } = FrontmatterParser.extract(processedContent);
+    let content = contentWithoutFrontmatter;
+    let frontmatterRaw = '';
+
+    if (hasFrontmatter && frontmatter && Object.keys(frontmatter).length > 0) {
+      frontmatterRaw = `---\n${yaml.dump(frontmatter)}---\n`
+    }
+
+    const outputDir = path.join(DOCS_BASE, lang, path.dirname(relativePath));
+    // Convert README.mdx to index.mdx so it becomes the category page content
+    const outputFileName = templateName === 'README.mdx' ? 'index.mdx' : templateName;
+    const outputPath = path.join(outputDir, outputFileName);
+
+    // Ensure directory exists
+    if (!fs.existsSync(outputDir)) {
+      fs.mkdirSync(outputDir, { recursive: true });
+    }
+
+    // Build output content
+    let output = '';
+
+    // Add frontmatter first if it exists (must be at the very top)
+    if (frontmatter) {
+      output += `${frontmatterRaw}\n`;
+    }
+
+    // Add auto-generation warning after frontmatter
+    output += `<!--\n`;
+    output += `  AUTO-GENERATED FILE - DO NOT EDIT\n`;
+    output += `  This file is generated from: src/pages/templates/${relativePath}\n`;
+    output += `  To make changes, edit the template file, then run: npm run generate:docs\n`;
+    output += `-->\n\n`;
+
+    // Add processed content (optimized for production, with Language components for development)
+    output += content;
+
+    // Write file
+    fs.writeFileSync(outputPath, output, 'utf8');
+  }
+
+  // Only add to manifest if some languages are missing
+  if (missingLanguages.length > 0) {
+    missingPagesManifest[pagePath] = missingLanguages;
+  }
+}
+
+/**
+ * Copy category configuration files to all language directories
+ * Copies _category_.json files from template directories to docs/main/{lang}/
+ * Preserves directory structure
+ */
+function copyCategoryFiles(): void {
+  function copyDirectory(sourceDir: string, relativePath: string = ''): void {
+    const entries = fs.readdirSync(sourceDir, { withFileTypes: true });
+
+    for (const entry of entries) {
+      const sourcePath = path.join(sourceDir, entry.name);
+      const currentRelativePath = path.join(relativePath, entry.name);
+
+      if (entry.isDirectory()) {
+        copyDirectory(sourcePath, currentRelativePath);
+      } else if (entry.isFile() && entry.name === '_category_.json') {
+        // Copy category file to all language directories with unique keys
+        const categoryContent = JSON.parse(fs.readFileSync(sourcePath, 'utf8'));
+
+        for (const lang of LANGUAGES) {
+          const targetDir = path.join(DOCS_BASE, lang, relativePath);
+          const targetPath = path.join(targetDir, '_category_.json');
+
+          // Ensure target directory exists
+          if (!fs.existsSync(targetDir)) {
+            fs.mkdirSync(targetDir, { recursive: true });
+          }
+
+          // Add unique key based on language and relative path
+          const modifiedContent = {
+            ...categoryContent,
+            key: `${lang}-${relativePath.replace(/[/\\]/g, '-') || 'root'}`,
+          };
+
+          fs.writeFileSync(targetPath, JSON.stringify(modifiedContent, null, 2) + '\n');
+        }
+      }
+    }
+  }
+
+  copyDirectory(TEMPLATES_DIR);
+}
+
+/**
+ * Find all template files in src/components recursively
+ */
+function findTemplateFiles(): string[] {
+  if (!fs.existsSync(TEMPLATES_DIR)) {
+    console.error(`Templates directory not found: ${TEMPLATES_DIR}`);
+    return [];
+  }
+
+  const templates: string[] = [];
+
+  function searchDirectory(dir: string): void {
+    const entries = fs.readdirSync(dir, { withFileTypes: true });
+
+    for (const entry of entries) {
+      const fullPath = path.join(dir, entry.name);
+
+      if (entry.isDirectory()) {
+        searchDirectory(fullPath);
+      } else if (entry.isFile() && entry.name.endsWith('.mdx')) {
+        // Skip generation of underscore-prefixed files (utility/unlisted templates)
+        if (entry.name.startsWith('_')) {
+          continue;
+        }
+        templates.push(fullPath);
+      }
+    }
+  }
+
+  searchDirectory(TEMPLATES_DIR);
+  return templates;
+}
+
+/**
+ * Create root-level category files for each language directory
+ * Creates _category_.json files in docs/main/{lang}/ with proper positioning
+ */
+function createLanguageRootCategories(): void {
+  // Position values for each language for correct sidebar ordering
+  const languagePositions = {
+    typescript: 2.0,
+    csharp: 2.1,
+    python: 2.2,
+  };
+
+  for (const lang of LANGUAGES) {
+    const langDir = path.join(DOCS_BASE, lang);
+    const categoryPath = path.join(langDir, '_category_.json');
+
+    // Ensure directory exists
+    if (!fs.existsSync(langDir)) {
+      fs.mkdirSync(langDir, { recursive: true });
+    }
+
+    // Create category configuration
+    const categoryConfig = {
+      label: `${LANGUAGE_NAMES[lang]} Guide`,
+      position: languagePositions[lang],
+      collapsible: true,
+      collapsed: false,
+    };
+
+    // Write the category file
+    fs.writeFileSync(categoryPath, JSON.stringify(categoryConfig, null, 2), 'utf8');
+  }
+}
+
+  // After all templates are processed, warn about orphaned include files
+  function warnOrphanedIncludeFiles() {
+    const orphanedFiles: Array<{ lang: string; fullPath: string; relTemplate: string }> = [];
+    function scanDir(dir: string) {
+      const entries = fs.readdirSync(dir, { withFileTypes: true });
+      for (const entry of entries) {
+        const fullPath = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+          scanDir(fullPath);
+        } else if (entry.isFile() && entry.name.endsWith('.incl.md')) {
+          if (!processedIncludeFiles.has(path.resolve(fullPath))) {
+            // Extract language from filename
+            const match = entry.name.match(LANGUAGE_INCL_FILENAME_REGEX);
+            const lang = match ? match[1] : 'unknown';
+            const templatePath = getTemplatePathFromInclude(fullPath);
+            const relTemplate = normalizePath(path.relative(process.cwd(), templatePath));
+            orphanedFiles.push({ lang, fullPath, relTemplate });
+          }
+        }
+      }
+    }
+    scanDir(FRAGMENTS_DIR);
+    if (orphanedFiles.length > 0) {
+      console.warn(`\n[DevMode] Orphaned include files were found. These files are not referenced by any template (possibly due to 'language' frontmatter restrictions):`);
+      orphanedFiles.forEach(({ lang, fullPath, relTemplate }) => {
+        console.warn(`  - [${lang}] ${fullPath}\n      Template: ${relTemplate}`);
+      });
+    }
+  }
+
+/**
+ * Write the missing pages manifest to static directory
+ */
+function writePageManifest(): void {
+  const manifestPath = normalizePath(path.join(__dirname, '..', 'static', 'missing-pages.json'));
+
+  // Ensure static directory exists
+  const staticDir = path.dirname(manifestPath);
+  if (!fs.existsSync(staticDir)) {
+    fs.mkdirSync(staticDir, { recursive: true });
+  }
+
+  // Write compact JSON with only pages that are missing from some languages
+  fs.writeFileSync(manifestPath, JSON.stringify(missingPagesManifest, null, 2), 'utf8');
+  console.log(
+    `\nWrote missing pages manifest to ${path.relative(process.cwd(), manifestPath)} (${Object.keys(missingPagesManifest).length} entries)`
+  );
+}
+
+/**
+ * Write the content gaps manifest for tracking missing sections
+ */
+function writeContentGapsManifest(): void {
+  const generatedDir = normalizePath(path.join(__dirname, 'generated'));
+  const manifestPath = normalizePath(path.join(generatedDir, 'content-gaps.json'));
+  const readmePath = normalizePath(path.join(generatedDir, 'content-gaps.md'));
+
+  // Ensure generated directory exists
+  if (!fs.existsSync(generatedDir)) {
+    fs.mkdirSync(generatedDir, { recursive: true });
+  }
+
+  fs.writeFileSync(manifestPath, JSON.stringify(contentGapsManifest, null, 2), 'utf8');
+
+  // Generate human-readable markdown report
+  let markdownContent = `# Content Gaps Report\n\n`;
+  markdownContent += `Generated: ${new Date().toISOString()}\n\n`;
+  markdownContent += `This report tracks missing sections in language-specific documentation.\n\n`;
+
+  const totalGaps = Object.keys(contentGapsManifest).length;
+
+  markdownContent += `**${totalGaps} template(s) have missing sections**\n\n`;
+
+  if (totalGaps > 0) {
+    for (const [templatePath, sections] of Object.entries(contentGapsManifest)) {
+      markdownContent += `## \`${templatePath}\`\n\n`;
+
+      for (const [sectionName, languages] of Object.entries(sections)) {
+        const langNames = languages.map(lang => LANGUAGE_NAMES[lang]).join(', ');
+        markdownContent += `- **\`${sectionName}\`**: Missing in ${langNames}\n`;
+      }
+      markdownContent += `\n`;
+    }
+  }
+
+  markdownContent += `## Summary\n\n`;
+  const totalSectionGaps = Object.values(contentGapsManifest)
+    .flatMap(sections => Object.values(sections))
+    .reduce((total, langs) => total + langs.length, 0);
+  markdownContent += `- **${totalGaps}** templates with gaps\n`;
+  markdownContent += `- **${totalSectionGaps}** total missing sections\n`;
+
+  fs.writeFileSync(readmePath, markdownContent, 'utf8');
+
+  console.log(
+    `\nWrote content gaps manifest to ${path.relative(process.cwd(), manifestPath)} (${totalGaps} templates with gaps)`
+  );
+  console.log(`Generated readable report: ${path.relative(process.cwd(), readmePath)}`);
+}
+
+/**
+ * Generate all docs
+ */
+function generateAll(): void {
+  console.log('generate-language-docs.ts: Generating language-specific documentation...\n');
+
+  // Clean up stale files first
+  cleanGeneratedFiles();
+
+  // Reset manifests
+  Object.keys(missingPagesManifest).forEach((key) => delete missingPagesManifest[key]);
+  Object.keys(contentGapsManifest).forEach((key) => delete contentGapsManifest[key]);
+
+  const templates = findTemplateFiles();
+
+  if (templates.length === 0) {
+    console.log('No template files found in src/pages/templates/');
+    return;
+  }
+
+  templates.forEach(generateDocsForTemplate);
+
+  // Copy category configuration files
+  copyCategoryFiles();
+
+  // Create root-level category files for language directories
+  createLanguageRootCategories();
+
+  // Warn about orphaned include files
+  if (!isProduction) {
+    warnOrphanedIncludeFiles();
+  }
+
+  // Write the page manifest
+  writePageManifest();
+
+  // Write the content gaps manifest
+  writeContentGapsManifest();
+
+  console.log(`\nGenerated ${templates.length} template(s) for ${LANGUAGES.length} languages\n`);
+}
+
+/**
+ * Watch mode for development
+ */
+function watch(): void {
+  console.log('\nWatching for template and fragment changes...\n');
+
+  // Watch templates
+  const templateWatcher = chokidar.watch(path.join(TEMPLATES_DIR, '**/*.mdx'), {
+    persistent: true,
+    ignoreInitial: true,
+  });
+
+  templateWatcher.on('add', (filePath: string) => {
+    generateDocsForTemplate(filePath);
+  });
+
+  templateWatcher.on('change', (filePath: string) => {
+    generateDocsForTemplate(filePath);
+  });
+
+  templateWatcher.on('unlink', (filePath: string) => {
+    cleanGeneratedFilesForTemplate(filePath);
+  });
+
+  // Watch Language Include/fragment files (*.incl.md)
+  const inclWatcher = chokidar.watch(path.join(FRAGMENTS_DIR, '**/*.incl.md'), {
+    persistent: true,
+    ignoreInitial: true,
+  });
+
+  /**
+   * Handle changes to include files and regenerate corresponding templates
+   * Maps include file paths to their corresponding template files:
+   * - Category pages: src/components/include/{path}/{lang}.incl.md → src/pages/templates/{path}/README.mdx
+   * - Regular pages: src/components/include/{path}/{page}/{lang}.incl.md → src/pages/templates/{path}/{page}.mdx
+   */
+  const handleInclChange = (filePath: string): void => {
+    const relativePath = path.relative(FRAGMENTS_DIR, filePath);
+    const parts = relativePath.split(path.sep);
+
+    const langFile = parts.pop();
+
+    let templatePath: string;
+
+    if (langFile && LANGUAGE_INCL_FILENAME_REGEX.test(langFile)) {
+      templatePath = path.join(TEMPLATES_DIR, ...parts, 'README.mdx');
+
+      if (!fs.existsSync(templatePath)) {
+        templatePath = path.join(TEMPLATES_DIR, ...parts) + '.mdx';
+      }
+    } else {
+      templatePath = path.join(TEMPLATES_DIR, ...parts) + '.mdx';
+    }
+
+    if (fs.existsSync(templatePath)) {
+      console.log(`\nFragment changed: ${relativePath}`);
+      console.log(`Regenerating template: ${path.relative(TEMPLATES_DIR, templatePath)}`);
+      generateDocsForTemplate(templatePath);
+    } else {
+      console.warn(`\nFragment changed but template not found: ${templatePath}`);
+      console.warn('This might be an orphaned fragment file.');
+    }
+  };
+
+  inclWatcher.on('change', handleInclChange);
+  inclWatcher.on('add', handleInclChange);
+
+  // Watch category configuration files in templates
+  const categoryWatcher = chokidar.watch(path.join(TEMPLATES_DIR, '**/_category_.json'), {
+    persistent: true,
+    ignoreInitial: true,
+  });
+
+  categoryWatcher.on('change', () => {
+    copyCategoryFiles();
+  });
+
+  categoryWatcher.on('add', () => {
+    copyCategoryFiles();
+  });
+}
+
+// Main execution
+if (require.main === module) {
+  const args = process.argv.slice(2);
+  const watchMode = args.includes('--watch') || args.includes('-w');
+
+  if (watchMode) {
+    generateAll();
+    watch();
+  } else {
+    generateAll();
+  }
+}
+
+export { generateAll, generateDocsForTemplate };
