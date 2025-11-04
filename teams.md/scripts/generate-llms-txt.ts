@@ -10,7 +10,7 @@ import { LANGUAGES, Language, LANGUAGE_NAMES } from '../src/constants/languages'
 const LANGUAGE_SPECIFIC_TIPS: Record<Language, string[]> = {
     typescript: [
         "It's a good idea to build the application using `npm run build` and fix compile time errors to help ensure the app works as expected.",
-        "The library uses typescript to help you make the right decisions when using the APIs. You may check type definitions and type checkers to make sure your code is correct."
+        "The SDK uses typescript to help you make the right decisions when using the APIs. You may check type definitions and type checkers to make sure your code is correct."
     ],
     python: [
         "It's a good idea to run `uv run typecheck` to make sure the code is correctly typed and fix any type errors.",
@@ -26,10 +26,10 @@ const COMMON_OVERALL_SUMMARY = (language: Language) => {
     const tips = LANGUAGE_SPECIFIC_TIPS[language];
     const formattedTips = tips.map(tip => `- ${tip}`).join('\n');
 
-    return `> Microsoft Teams AI Library (v2) - A comprehensive framework for building AI-powered Teams applications using ${langName}. Using this Library, you can easily build and integrate a variety of features in Microsoft Teams by building Agents or Tools. The documentation here helps by giving background information and code samples on how best to do this.
+    return `> Microsoft Teams SDK - A comprehensive framework for building AI-powered Teams applications using ${langName}. Using this SDK, you can easily build and integrate a variety of features in Microsoft Teams by building Agents or Tools. The documentation here helps by giving background information and code samples on how best to do this.
 
 IMPORTANT THINGS TO REMEMBER:
-- This Library is NOT based off of BotFramework (which the _previous_ version of the Teams AI Library was based on). This Library is a completely new framework. Use this guide to find snippets to drive your decisions.
+- This SDK is NOT based off of BotFramework (which the _previous_ version of the Teams SDK was based on). This SDK is a completely new framework. Use this guide to find snippets to drive your decisions.
 - When scaffolding new applications, using the CLI is a lot simpler and preferred than doing it all by yourself. See the Quickstart guide for that.
 ${formattedTips}
 
@@ -83,17 +83,17 @@ function getDocusaurusConfig(baseDir: string): DocusaurusConfig {
             configContent.match(/baseUrl:\s*['"]([^'"]+)['"]/);
 
         const url = urlMatch ? urlMatch[1] : 'https://microsoft.github.io';
-        const baseUrl = baseUrlMatch ? baseUrlMatch[1] : '/teams-ai/';
+        const baseUrl = baseUrlMatch ? baseUrlMatch[1] : '/teams-sdk/';
 
         return { url, baseUrl };
     } catch (error) {
         console.warn('⚠️ Could not read Docusaurus config, using defaults');
-        return { url: 'https://microsoft.github.io', baseUrl: '/teams-ai/' };
+        return { url: 'https://microsoft.github.io', baseUrl: '/teams-sdk/' };
     }
 }
 
 /**
- * Generates llms.txt files for Teams AI documentation
+ * Generates llms.txt files for Teams SDK documentation
  * Creates both small and full versions for TypeScript and C# docs
  */
 async function generateLlmsTxt(): Promise<void> {
@@ -302,7 +302,7 @@ async function generateSmallVersionHierarchical(language: Language, baseDir: str
     const cleanBaseUrl = config.baseUrl.startsWith('/') ? config.baseUrl : '/' + config.baseUrl;
     const fullBaseUrl = `${cleanUrl}${cleanBaseUrl}`;
 
-    let content = `# Teams AI Library - ${langName} Documentation\n\n`;
+    let content = `# Teams SDK - ${langName} Documentation\n\n`;
     content += COMMON_OVERALL_SUMMARY(language) + '\n\n';
 
     // Get hierarchical structure
@@ -496,7 +496,7 @@ function extractSummaryFromFile(filePath: string): string {
  */
 async function generateFullVersion(language: Language, processedFiles: ProcessedFile[], baseDir: string): Promise<string> {
     const langName = LANGUAGE_NAMES[language]
-    let content = `# Teams AI Library - ${langName} Documentation (Complete)\n\n`;
+    let content = `# Teams SDK - ${langName} Documentation (Complete)\n\n`;
     content += COMMON_OVERALL_SUMMARY(language) + '\n\n';
 
     // Group files by section

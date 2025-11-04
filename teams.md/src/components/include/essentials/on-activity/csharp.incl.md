@@ -1,6 +1,6 @@
 <!-- intro -->
 
-The Teams AI Library v2 exposes a fluent router so you can subscribe to these activities with `app.OnActivity(...)`, or you can use controllers/attributes.
+The Teams SDK exposes a fluent router so you can subscribe to these activities with `app.OnActivity(...)`, or you can use controllers/attributes.
 
 <!-- basic-example -->
 
