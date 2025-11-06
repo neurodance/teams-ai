@@ -4,8 +4,9 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as chokidar from 'chokidar';
 import * as yaml from 'js-yaml';
+import stringify from 'json-stable-stringify';
 
-import { FrontmatterParser } from './lib/frontmatter-parser';
+import { FrontmatterParser, FRONTMATTER_REGEX } from './lib/frontmatter-parser';
 import {
   LANGUAGES,
   LANGUAGE_NAMES,
@@ -13,6 +14,7 @@ import {
   type LanguageAvailabilityMap,
 } from '../src/constants/languages';
 import normalizePath from '../src/utils/normalizePath';
+import readFileUtf8Normalized from '../src/utils/readFileUtf8Normalized';
 
 const missingPagesManifest: LanguageAvailabilityMap = {};
 const contentGapsManifest: { [templatePath: string]: { [sectionName: string]: Language[] } } = {};
@@ -41,8 +43,6 @@ const LANGUAGE_INCLUDE_REGEX = /<LanguageInclude\s+section="([^"]+)"\s*\/>/g;
 
 const languagePattern = LANGUAGES.join('|');
 const LANGUAGE_INCL_FILENAME_REGEX = new RegExp(`^(${languagePattern})\\.incl\\.md$`);
-
-const FRONTMATTER_REGEX = /^---\n[\s\S]*?\n---\n/;
 
 /**
  * Extract a section from markdown content using HTML comment markers
@@ -146,7 +146,7 @@ function processLanguageIncludeTags(
         }
 
         try {
-          const fileContent = fs.readFileSync(inclPath, 'utf8');
+          const fileContent = readFileUtf8Normalized(inclPath);
           const sectionContent = extractSection(fileContent, sectionName);
 
           if (sectionContent === null || sectionContent === '' || sectionContent === 'EMPTY_SECTION') {
@@ -196,13 +196,13 @@ function processLanguageIncludeTags(
         }
 
         try {
-          const fileContent = fs.readFileSync(inclPath, 'utf8');
+          const fileContent = readFileUtf8Normalized(inclPath);
           sectionContent = extractSection(fileContent, sectionName);
 
           if (sectionContent === null || sectionContent === 'EMPTY_SECTION') {
             // Section not found (null) or section exists but has no content (EMPTY_SECTION)
             // Track this gap in the manifest
-            const gapKey = path.relative(TEMPLATES_DIR, templatePath);
+            const gapKey = normalizePath(path.relative(TEMPLATES_DIR, templatePath));
             if (!contentGapsManifest[gapKey]) {
               contentGapsManifest[gapKey] = {};
             }
@@ -395,8 +395,8 @@ function generateDocsForTemplate(templatePath: string): void {
   const relativePath = normalizePath(path.relative(TEMPLATES_DIR, templatePath));
   const templateName = path.basename(templatePath);
 
-  // Read template content
-  const templateContent = fs.readFileSync(templatePath, 'utf8');
+  // Read template content (normalize CRLF > LF)
+  const templateContent = readFileUtf8Normalized(templatePath);
 
   // Check frontmatter for warning suppression
   const { frontmatter } = FrontmatterParser.extract(templateContent);
@@ -493,7 +493,7 @@ function copyCategoryFiles(): void {
         copyDirectory(sourcePath, currentRelativePath);
       } else if (entry.isFile() && entry.name === '_category_.json') {
         // Copy category file to all language directories with unique keys
-        const categoryContent = JSON.parse(fs.readFileSync(sourcePath, 'utf8'));
+        const categoryContent = JSON.parse(readFileUtf8Normalized(sourcePath));
 
         for (const lang of LANGUAGES) {
           const targetDir = path.join(DOCS_BASE, lang, relativePath);
@@ -549,6 +549,8 @@ function findTemplateFiles(): string[] {
   }
 
   searchDirectory(TEMPLATES_DIR);
+  // Deterministic ordering across platforms
+  templates.sort((a, b) => normalizePath(a).localeCompare(normalizePath(b)));
   return templates;
 }
 
@@ -586,35 +588,35 @@ function createLanguageRootCategories(): void {
   }
 }
 
-  // After all templates are processed, warn about orphaned include files
-  function warnOrphanedIncludeFiles() {
-    const orphanedFiles: Array<{ lang: string; fullPath: string; relTemplate: string }> = [];
-    function scanDir(dir: string) {
-      const entries = fs.readdirSync(dir, { withFileTypes: true });
-      for (const entry of entries) {
-        const fullPath = path.join(dir, entry.name);
-        if (entry.isDirectory()) {
-          scanDir(fullPath);
-        } else if (entry.isFile() && entry.name.endsWith('.incl.md')) {
-          if (!processedIncludeFiles.has(path.resolve(fullPath))) {
-            // Extract language from filename
-            const match = entry.name.match(LANGUAGE_INCL_FILENAME_REGEX);
-            const lang = match ? match[1] : 'unknown';
-            const templatePath = getTemplatePathFromInclude(fullPath);
-            const relTemplate = normalizePath(path.relative(process.cwd(), templatePath));
-            orphanedFiles.push({ lang, fullPath, relTemplate });
-          }
+// After all templates are processed, warn about orphaned include files
+function warnOrphanedIncludeFiles() {
+  const orphanedFiles: Array<{ lang: string; fullPath: string; relTemplate: string }> = [];
+  function scanDir(dir: string) {
+    const entries = fs.readdirSync(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      const fullPath = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        scanDir(fullPath);
+      } else if (entry.isFile() && entry.name.endsWith('.incl.md')) {
+        if (!processedIncludeFiles.has(path.resolve(fullPath))) {
+          // Extract language from filename
+          const match = entry.name.match(LANGUAGE_INCL_FILENAME_REGEX);
+          const lang = match ? match[1] : 'unknown';
+          const templatePath = getTemplatePathFromInclude(fullPath);
+          const relTemplate = normalizePath(path.relative(process.cwd(), templatePath));
+          orphanedFiles.push({ lang, fullPath, relTemplate });
         }
       }
     }
-    scanDir(FRAGMENTS_DIR);
-    if (orphanedFiles.length > 0) {
-      console.warn(`\n[DevMode] Orphaned include files were found. These files are not referenced by any template (possibly due to 'language' frontmatter restrictions):`);
-      orphanedFiles.forEach(({ lang, fullPath, relTemplate }) => {
-        console.warn(`  - [${lang}] ${fullPath}\n      Template: ${relTemplate}`);
-      });
-    }
   }
+  scanDir(FRAGMENTS_DIR);
+  if (orphanedFiles.length > 0) {
+    console.warn(`\n[DevMode] Orphaned include files were found. These files are not referenced by any template (possibly due to 'language' frontmatter restrictions):`);
+    orphanedFiles.forEach(({ lang, fullPath, relTemplate }) => {
+      console.warn(`  - [${lang}] ${fullPath}\n      Template: ${relTemplate}`);
+    });
+  }
+}
 
 /**
  * Write the missing pages manifest to static directory
@@ -629,7 +631,8 @@ function writePageManifest(): void {
   }
 
   // Write compact JSON with only pages that are missing from some languages
-  fs.writeFileSync(manifestPath, JSON.stringify(missingPagesManifest, null, 2), 'utf8');
+  // Ensure deterministic sorting across platforms using json-stable-stringify
+  fs.writeFileSync(manifestPath, stringify(missingPagesManifest, { space: 2 }) + '\n', 'utf8');
   console.log(
     `\nWrote missing pages manifest to ${path.relative(process.cwd(), manifestPath)} (${Object.keys(missingPagesManifest).length} entries)`
   );
@@ -648,7 +651,8 @@ function writeContentGapsManifest(): void {
     fs.mkdirSync(generatedDir, { recursive: true });
   }
 
-  fs.writeFileSync(manifestPath, JSON.stringify(contentGapsManifest, null, 2), 'utf8');
+  // Directly stringify manifest (order not important; stable stringify ensures deterministic output anyway)
+  fs.writeFileSync(manifestPath, stringify(contentGapsManifest, { space: 2 }) + '\n', 'utf8');
 
   // Generate human-readable markdown report
   let markdownContent = `# Content Gaps Report\n\n`;
@@ -662,7 +666,6 @@ function writeContentGapsManifest(): void {
   if (totalGaps > 0) {
     for (const [templatePath, sections] of Object.entries(contentGapsManifest)) {
       markdownContent += `## \`${templatePath}\`\n\n`;
-
       for (const [sectionName, languages] of Object.entries(sections)) {
         const langNames = languages.map(lang => LANGUAGE_NAMES[lang]).join(', ');
         markdownContent += `- **\`${sectionName}\`**: Missing in ${langNames}\n`;
@@ -674,7 +677,7 @@ function writeContentGapsManifest(): void {
   markdownContent += `## Summary\n\n`;
   const totalSectionGaps = Object.values(contentGapsManifest)
     .flatMap(sections => Object.values(sections))
-    .reduce((total, langs) => total + langs.length, 0);
+    .reduce((total, langs: Language[]) => total + langs.length, 0);
   markdownContent += `- **${totalGaps}** templates with gaps\n`;
   markdownContent += `- **${totalSectionGaps}** total missing sections\n`;
 
