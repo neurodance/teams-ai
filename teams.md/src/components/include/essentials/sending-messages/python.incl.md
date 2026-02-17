@@ -46,3 +46,22 @@ async def handle_message(ctx: ActivityContext[MessageActivity]):
 async def handle_message(ctx: ActivityContext[MessageActivity]):
   await ctx.send(MessageActivityInput(text='hi!').add_mention(account=ctx.activity.from_))
 ```
+
+<!-- targeted-method-name -->
+
+`with_recipient`
+
+<!-- targeted-send-example -->
+
+```python
+from microsoft_teams.api import MessageActivity, MessageActivityInput
+from microsoft_teams.apps import ActivityContext
+
+@app.on_message
+async def handle_message(ctx: ActivityContext[MessageActivity]):
+    # Using with_recipient with is_targeted=True explicitly targets the specified recipient
+    await ctx.send(
+        MessageActivityInput(text="This message is only visible to you!")
+            .with_recipient(ctx.activity.from_, is_targeted=True)
+    )
+```
